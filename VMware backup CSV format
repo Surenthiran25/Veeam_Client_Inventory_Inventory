@@ -1,1 +1,70 @@
+# Load Veeam PowerShell Module
+Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+
+# Initialize results array
+$results = @()
+
+# Define cutoff date (last 7 days)
+$cutoffDate = (Get-Date).AddDays(-7)
+
+# Get all backup jobs of specific types
+$backups = Get-VBRBackup | Where-Object {
+    $_.JobType -in @(
+        "VmBackup", 
+        "WindowsAgent", 
+        "LinuxAgent", 
+        "PerVmParentBackup", 
+        "SqlBackup", 
+        "SqlLogBackup", 
+        "BackupSync"
+    )
+}
+
+# Loop through each backup job
+foreach ($backup in $backups) {
+    $jobName = $backup.JobName
+    $jobType = $backup.JobType
+
+    try {
+        # Get restore points within the last 7 days
+        $restorePoints = Get-VBRRestorePoint -Backup $backup | Where-Object {
+            $_.CreationTime -ge $cutoffDate
+        }
+
+        # Get latest restore point per object
+        $latestPoints = $restorePoints | Group-Object Name | ForEach-Object {
+            $_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1
+        }
+
+        foreach ($rp in $latestPoints) {
+            if ($rp.IsConsistent) {
+                $status = "Success"
+            } elseif ($rp.IsCorrupted) {
+                $status = "Failed"
+            } else {
+                $status = "Warning"
+            }
+
+            $results += [PSCustomObject]@{
+                JobName          = $jobName
+                BackupType       = $jobType
+                ObjectName       = $rp.Name
+                LatestBackupTime = $rp.CreationTime
+                Repository       = $rp.Repository.Name
+                Status           = $status
+            }
+        }
+    }
+    catch {
+        Write-Warning "Error processing job $jobName: $_"
+        continue
+    }
+}
+
+# Export report to Desktop
+$csvPath = "$env:USERPROFILE\Desktop\Veeam_Backup_Report_7Days.csv"
+$results | Sort-Object LatestBackupTime -Descending | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+
+Write-Host "`nBackup Report generated successfully!"
+Write-Host "Saved to: $csvPath`n"
 
