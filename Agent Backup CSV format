@@ -1,0 +1,71 @@
+# Import Veeam PowerShell Module
+Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+
+# Initialize results array
+$results = @()
+
+# Set cutoff date to 7 days ago
+$cutoffDate = (Get-Date).AddDays(-7)
+
+# Patterns to identify agent-type jobs
+$jobNamePatterns = @("Agent", "Physical", "Laptop", "Workstation")
+
+# Get all backups with job names matching the patterns
+$backups = Get-VBRBackup | Where-Object {
+    $match = $false
+    foreach ($pattern in $jobNamePatterns) {
+        if ($_.JobName -like "*$pattern*") {
+            $match = $true
+            break
+        }
+    }
+    return $match
+}
+
+# Loop through filtered backups
+foreach ($backup in $backups) {
+    $jobName = $backup.JobName
+    $jobType = $backup.JobType
+
+    try {
+        # Get restore points from last 7 days
+        $restorePoints = Get-VBRRestorePoint -Backup $backup | Where-Object {
+            $_.CreationTime -ge $cutoffDate
+        }
+
+        # Get latest restore point per object
+        $latestPoints = $restorePoints | Group-Object Name | ForEach-Object {
+            $_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1
+        }
+
+        foreach ($rp in $latestPoints) {
+            if ($rp.IsConsistent) {
+                $status = "Success"
+            } elseif ($rp.IsCorrupted) {
+                $status = "Failed"
+            } else {
+                $status = "Warning"
+            }
+
+            $results += [PSCustomObject]@{
+                JobName          = $jobName
+                BackupType       = $jobType
+                ObjectName       = $rp.Name
+                LatestBackupTime = $rp.CreationTime
+                Repository       = $rp.Repository.Name
+                Status           = $status
+            }
+        }
+    }
+    catch {
+        Write-Warning "Error processing job '$jobName': $_"
+        continue
+    }
+}
+
+# Export results to CSV on Desktop
+$csvPath = "$env:USERPROFILE\Desktop\Agent_Backup_Report_7Days.csv"
+$results | Sort-Object LatestBackupTime -Descending | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+
+Write-Host "`nAgent backup report (filtered by job name) generated!"
+Write-Host "Saved to: $csvPath`n"
